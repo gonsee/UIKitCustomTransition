@@ -8,6 +8,8 @@
 import UIKit
 
 final class ViewController: UIViewController {
+    weak var customPresentationController: CustomPresentationController?
+
     @IBAction func open(_ sender: Any) {
         let viewController = ChildViewController()
         let navigationController = UINavigationController(rootViewController: viewController)
@@ -40,6 +42,7 @@ extension ViewController: UIViewControllerTransitioningDelegate {
             presenting: presenting,
             backgroundColor: UIColor.systemBlue
         )
+        customPresentationController = presentationController
         return presentationController
     }
 
@@ -53,6 +56,11 @@ extension ViewController: UIViewControllerTransitioningDelegate {
     /// 閉じるとき用のAnimatorを返す
     func animationController(forDismissed dismissed: UIViewController) -> UIViewControllerAnimatedTransitioning? {
         SlideOutAnimator()
+    }
+
+    /// ドラッグで閉じるための InteractiveTransitioning のインスタンスを返す
+    func interactionControllerForDismissal(using animator: any UIViewControllerAnimatedTransitioning) -> (any UIViewControllerInteractiveTransitioning)? {
+        customPresentationController?.interactiveTransition
     }
 }
 
@@ -119,18 +127,33 @@ final class SlideOutAnimator: NSObject, UIViewControllerAnimatedTransitioning {
         let finalFrame = initialFrame.offsetBy(dx: 0, dy: initialFrame.height)
 
         if transitionContext.isAnimated {
-            UIView.animate(
-                withDuration: 0.3,
-                delay: 0,
-                usingSpringWithDamping: 1,
-                initialSpringVelocity: 0,
-                animations: {
-                    fromView.frame = finalFrame
-                },
-                completion: { _ in
-                    transitionContext.completeTransition(!transitionContext.transitionWasCancelled)
-                }
-            )
+            if transitionContext.isInteractive {
+                // ドラッグで閉じる場合はアニメーションをlinearにすることで、手の動きに自然に追従するようにする
+                UIView.animate(
+                    withDuration: 0.3,
+                    delay: 0,
+                    options: .curveLinear,
+                    animations: {
+                        fromView.frame = finalFrame
+                    },
+                    completion: { _ in
+                        transitionContext.completeTransition(!transitionContext.transitionWasCancelled)
+                    }
+                )
+            } else {
+                UIView.animate(
+                    withDuration: 0.3,
+                    delay: 0,
+                    usingSpringWithDamping: 1,
+                    initialSpringVelocity: 0,
+                    animations: {
+                        fromView.frame = finalFrame
+                    },
+                    completion: { _ in
+                        transitionContext.completeTransition(!transitionContext.transitionWasCancelled)
+                    }
+                )
+            }
         } else {
             fromView.frame = finalFrame
         }
@@ -146,6 +169,11 @@ final class CustomPresentationController: UIPresentationController {
     private let backgroundView = UIView(frame: .zero)
     /// 表示される画面の中身を配置するビュー。presentedViewになる。
     private let sheetView = SheetView(frame: .zero)
+
+    /// ドラッグで閉じるためのジェスチャー
+    private lazy var panGestureRecognizer = UIPanGestureRecognizer(target: self, action: #selector(handlePanGesture(_:)))
+    /// ドラッグで閉じるための InteractiveTransition
+    private(set) var interactiveTransition: UIPercentDrivenInteractiveTransition?
 
     /// 初期化
     /// - Parameters:
@@ -175,6 +203,8 @@ final class CustomPresentationController: UIPresentationController {
         // それを閉じたときに、元の画面の幅が0になって表示されなくなる問題があったため、autoresizingMaskにしている。
         presentedViewController.view.frame = sheetView.bounds
         presentedViewController.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        // ドラッグで閉じるためのジェスチャーを追加
+        presentedViewController.view.addGestureRecognizer(panGestureRecognizer)
         // 画面を開くのに応じて背景に色をつける
         presentedViewController.transitionCoordinator?.animate(alongsideTransition: { _ in
             self.backgroundView.backgroundColor = self.backgroundColor
@@ -212,6 +242,42 @@ final class CustomPresentationController: UIPresentationController {
             width: containerView.bounds.width,
             height: containerView.bounds.height - containerView.safeAreaInsets.top
         )
+    }
+
+    /// ドラッグジェスチャーのハンドラー
+    @objc private func handlePanGesture(_ gesture: UIPanGestureRecognizer) {
+        guard let container = containerView else { return }
+        let translation = gesture.translation(in: container)
+        let velocity = gesture.velocity(in: container)
+        // 0〜1の範囲で進行度合いを算出
+        let progress = min(max(translation.y / sheetView.frame.height, 0), 1)
+
+        switch gesture.state {
+        case .possible:
+            break
+        case .began:
+            // InteractiveTransitionのインスタンスを作成してdismissを開始
+            interactiveTransition = UIPercentDrivenInteractiveTransition()
+            presentingViewController.dismiss(animated: true)
+        case .changed:
+            // 進行状態を更新
+            interactiveTransition?.update(progress)
+        case .ended:
+            if velocity.y > 500 || progress > 0.3 {
+                // 速度または移動距離の閾値を超えたら完了させる
+                interactiveTransition?.finish()
+            } else {
+                // それ以外は画面遷移をキャンセル
+                interactiveTransition?.cancel()
+            }
+            interactiveTransition = nil
+        case .cancelled, .failed:
+            interactiveTransition?.cancel()
+            interactiveTransition = nil
+        @unknown default:
+            interactiveTransition?.cancel()
+            interactiveTransition = nil
+        }
     }
 }
 
